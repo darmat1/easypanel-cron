@@ -37,7 +37,7 @@ COPY --from=builder /runner /runner
 # Add a health check to let Docker know if the service is running correctly.
 # It simply checks if the main process is alive.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD pgrep -x runner || exit 1
+  CMD ps -o pid= -p 1 | grep -q 1 || exit 1
 
 # Specify the command to run when the container starts.
 ENTRYPOINT ["/runner"]
