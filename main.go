@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -108,19 +109,48 @@ func (s SlogCronLogger) Error(err error, msg string, keysAndValues ...interface{
 	s.Logger.Error(msg, append([]interface{}{"error", err}, keysAndValues...)...)
 }
 
+// startHealthCheckServer starts a lightweight HTTP server on a separate goroutine
+// to respond to Docker's health checks.
+func startHealthCheckServer(logger *slog.Logger) {
+	listener, err := net.Listen("tcp", ":8081")
+	if err != nil {
+		logger.Error("Healthcheck server failed to start", "error", err)
+		os.Exit(1) // If we can't start the healthcheck, the app is faulty
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	logger.Info("Healthcheck server starting on :8081")
+
+	// Run the server in a background goroutine so it doesn't block the main app.
+	go func() {
+		if err := http.Serve(listener, mux); err != nil && err != http.ErrServerClosed {
+			logger.Error("Healthcheck server crashed", "error", err)
+		}
+	}()
+}
+
 func main() {
 	// 1. Set up structured JSON logger.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	// 2. Start the internal health check server.
+	startHealthCheckServer(logger)
+
 	logger.Info("Starting multi-job CRON runner...")
 
-	// 2. Load all job configurations from environment variables.
+	// 3. Load all job configurations from environment variables.
 	configs := loadConfigs(logger)
 	if len(configs) == 0 {
 		logger.Warn("No valid jobs configured. Exiting.")
 		os.Exit(0)
 	}
 
-	// 3. Create a reusable HTTP client and a new cron scheduler.
+	// 4. Create a reusable HTTP client and a new cron scheduler.
 	httpClient := &http.Client{Timeout: 60 * time.Second}
 	cronLogger := SlogCronLogger{Logger: logger}
 	c := cron.New(cron.WithChain(
@@ -128,10 +158,9 @@ func main() {
 		cron.Recover(cronLogger),
 	))
 
-	// 4. Iterate over all loaded configurations and create a job for each.
+	// 5. Iterate over all loaded configurations and create a job for each.
 	for _, config := range configs {
 		// IMPORTANT: Create a local copy of the config variable for the closure.
-		// This prevents all jobs from using the last configuration in the loop.
 		jobConf := config
 
 		var job func()
@@ -171,11 +200,9 @@ func main() {
 				logFields := []interface{}{"command", jobConf.ShellCommand}
 
 				if jobConf.ShellTargetContainer == "" {
-					// Execute the command locally within this container.
 					log.Info("Executing local shell command")
 					cmd = exec.CommandContext(ctx, "sh", "-c", jobConf.ShellCommand)
 				} else {
-					// Execute the command in another container via `docker exec`.
 					logFields = append(logFields, "target_container", jobConf.ShellTargetContainer)
 					log.Info("Executing remote shell command via docker exec", logFields...)
 					cmd = exec.CommandContext(ctx, "docker", "exec", jobConf.ShellTargetContainer, "sh", "-c", jobConf.ShellCommand)
@@ -207,11 +234,11 @@ func main() {
 		}
 	}
 
-	// 5. Start the cron scheduler.
+	// 6. Start the cron scheduler.
 	c.Start()
 	logger.Info("CRON scheduler started with configured jobs.", "job_count", len(c.Entries()))
 
-	// 6. Set up graceful shutdown.
+	// 7. Set up graceful shutdown.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit // Block until a signal is received.

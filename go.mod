@@ -1,4 +1,4 @@
-module generic-cron-runner
+module github.com/darmat1/easypanel-cron
 
 go 1.21
 
