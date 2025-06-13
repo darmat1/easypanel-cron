@@ -204,6 +204,70 @@ docker run -d \
   darmat1/easypanel-cron
 ```
 
+### Understanding `CRON_SECRET` (for `http` jobs)
+
+**What is it?**
+
+The `CRON_SECRET` is a **security token** or a **password**. Its purpose is to protect your application's API endpoints from unauthorized access.
+
+**Why is it necessary?**
+
+When you expose an API endpoint for a cron job (e.g., `https://myapp.com/api/trigger-report`), you don't want just anyone on the internet to be able to visit that URL and run your task. An unprotected endpoint can be exploited to:
+
+-   Overload your server (Denial of Service attack).
+-   Trigger sensitive operations repeatedly.
+-   Potentially expose data.
+
+The `CRON_SECRET` ensures that **only this cron runner service is allowed** to trigger the job.
+
+**How does it work?**
+
+1.  **In the Cron Runner:** You define a long, random, secret string in the `CRON_SECRET_i` environment variable. When the cron job runs, it sends an HTTP `GET` request to your `CRON_TARGET_URL_i` and automatically includes this secret in an `Authorization` header.
+    
+    ```http
+    GET /api/trigger-report HTTP/1.1
+    Host: myapp.com
+    Authorization: Bearer your_super_secret_string_here
+    ```
+
+2.  **In Your Application (e.g., Node.js, Laravel, Django):** In the code that handles the `/api/trigger-report` route, you must add a check:
+    
+    -   Read the `Authorization` header from the incoming request.
+    -   Verify that the token in the header **exactly matches** the secret you've stored in your application's environment variables.
+    -   **If the tokens match**, execute the task.
+    -   **If they do not match** (or the header is missing), immediately return an error (`401 Unauthorized` or `403 Forbidden`) and do nothing.
+
+**Example: Protecting an endpoint in a Node.js/Express app**
+
+```javascript
+// In your application's code
+const EXPECTED_CRON_SECRET = process.env.MY_APP_CRON_SECRET; // This must match the CRON_SECRET_i value
+
+app.get('/api/trigger-report', (req, res) => {
+  const authHeader = req.headers['authorization'];
+  
+  // Check if header exists and is in the format "Bearer <token>"
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).send('Unauthorized: Missing or invalid token format.');
+  }
+  
+  const receivedToken = authHeader.split(' ')[1];
+
+  // Compare the received token with the one we expect
+  if (receivedToken !== EXPECTED_CRON_SECRET) {
+    return res.status(403).send('Forbidden: Invalid token.');
+  }
+
+  // --- Authorization successful! ---
+  console.log('Cron job authorized. Running the report...');
+  runReportGeneration();
+  
+  res.status(200).send('Report generation started.');
+});
+```
+
+By implementing this check, you create a secure link between the cron runner and your application.
+
 ## Logging
 
 The application uses Go's standard `slog` library to produce structured JSON logs. This makes them easy to parse, search, and analyze.
