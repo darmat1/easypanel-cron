@@ -17,43 +17,43 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-// Config хранит конфигурацию для ОДНОЙ задачи.
+// Config holds the configuration for a SINGLE cron job.
 type Config struct {
-	Name     string // Имя задачи для логирования
+	Name     string // A friendly name for logging purposes.
 	Schedule string
-	JobType  string // "http" или "shell"
+	JobType  string // "http" or "shell"
 
-	// Поля для типа "http"
+	// Fields for "http" type
 	TargetURL   string
 	SecretToken string
 
-	// Поля для типа "shell"
+	// Fields for "shell" type
 	ShellCommand         string
 	ShellTargetContainer string
 }
 
-// loadConfigs загружает конфигурации для ВСЕХ задач из переменных окружения.
+// loadConfigs loads configurations for ALL jobs from environment variables.
 func loadConfigs(logger *slog.Logger) []Config {
 	var configs []Config
 
-	// Ищем задачи в бесконечном цикле, пока находим CRON_SCHEDULE_i
+	// Search for jobs in an infinite loop, looking for CRON_SCHEDULE_i
 	for i := 1; ; i++ {
 		scheduleKey := fmt.Sprintf("CRON_SCHEDULE_%d", i)
 		schedule := os.Getenv(scheduleKey)
 
-		// Если расписание для текущего индекса не найдено, считаем, что задач больше нет.
+		// If a schedule for the current index is not found, we assume there are no more jobs.
 		if schedule == "" {
 			break
 		}
 
 		jobType := os.Getenv(fmt.Sprintf("JOB_TYPE_%d", i))
 		if jobType == "" {
-			jobType = "http" // Тип по умолчанию
+			jobType = "http" // Default job type
 		}
 
 		jobName := os.Getenv(fmt.Sprintf("JOB_NAME_%d", i))
 		if jobName == "" {
-			jobName = fmt.Sprintf("job_#%d", i) // Имя по умолчанию
+			jobName = fmt.Sprintf("job_#%d", i) // Default job name
 		}
 
 		config := Config{
@@ -86,7 +86,7 @@ func loadConfigs(logger *slog.Logger) []Config {
 
 		if validationError != nil {
 			logger.Error("Skipping invalid job configuration", "job_name", config.Name, "reason", validationError)
-			continue // Пропускаем эту задачу и переходим к следующей
+			continue // Skip this job and move to the next one
 		}
 
 		configs = append(configs, config)
@@ -96,7 +96,7 @@ func loadConfigs(logger *slog.Logger) []Config {
 	return configs
 }
 
-// SlogCronLogger (без изменений)
+// SlogCronLogger is an adapter to allow the cron library to use our main slog.Logger.
 type SlogCronLogger struct {
 	Logger *slog.Logger
 }
@@ -109,23 +109,29 @@ func (s SlogCronLogger) Error(err error, msg string, keysAndValues ...interface{
 }
 
 func main() {
+	// 1. Set up structured JSON logger.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	logger.Info("Starting multi-job CRON runner...")
 
+	// 2. Load all job configurations from environment variables.
 	configs := loadConfigs(logger)
 	if len(configs) == 0 {
 		logger.Warn("No valid jobs configured. Exiting.")
 		os.Exit(0)
 	}
 
+	// 3. Create a reusable HTTP client and a new cron scheduler.
 	httpClient := &http.Client{Timeout: 60 * time.Second}
 	cronLogger := SlogCronLogger{Logger: logger}
-	c := cron.New(cron.WithChain(cron.Recover(cronLogger)))
+	c := cron.New(cron.WithChain(
+		// Recover prevents the entire runner from crashing if a job panics.
+		cron.Recover(cronLogger),
+	))
 
-	// Итерируемся по всем загруженным конфигурациям и создаем для каждой свою задачу
+	// 4. Iterate over all loaded configurations and create a job for each.
 	for _, config := range configs {
-		// ВАЖНО: Создаем копию переменной `config` для замыкания.
-		// Это предотвращает использование последней конфигурации из цикла для всех задач.
+		// IMPORTANT: Create a local copy of the config variable for the closure.
+		// This prevents all jobs from using the last configuration in the loop.
 		jobConf := config
 
 		var job func()
@@ -165,9 +171,11 @@ func main() {
 				logFields := []interface{}{"command", jobConf.ShellCommand}
 
 				if jobConf.ShellTargetContainer == "" {
+					// Execute the command locally within this container.
 					log.Info("Executing local shell command")
 					cmd = exec.CommandContext(ctx, "sh", "-c", jobConf.ShellCommand)
 				} else {
+					// Execute the command in another container via `docker exec`.
 					logFields = append(logFields, "target_container", jobConf.ShellTargetContainer)
 					log.Info("Executing remote shell command via docker exec", logFields...)
 					cmd = exec.CommandContext(ctx, "docker", "exec", jobConf.ShellTargetContainer, "sh", "-c", jobConf.ShellCommand)
@@ -192,21 +200,24 @@ func main() {
 			}
 		}
 
-		// Добавляем созданную задачу в планировщик
+		// Add the newly created job to the cron scheduler.
 		_, err := c.AddFunc(jobConf.Schedule, job)
 		if err != nil {
 			logger.Error("Failed to add CRON job", "job_name", jobConf.Name, "error", err)
 		}
 	}
 
+	// 5. Start the cron scheduler.
 	c.Start()
 	logger.Info("CRON scheduler started with configured jobs.", "job_count", len(c.Entries()))
 
-	// Graceful Shutdown (без изменений)
+	// 6. Set up graceful shutdown.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	<-quit // Block until a signal is received.
+
 	logger.Info("Shutting down CRON runner...")
+	// Stop the scheduler and wait for any running jobs to finish.
 	shutdownCtx := c.Stop()
 	<-shutdownCtx.Done()
 	logger.Info("CRON runner shut down gracefully.")

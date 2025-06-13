@@ -1,34 +1,43 @@
-# --- Этап 1: Сборка приложения (Builder) ---
-# Мы используем официальный образ Go для компиляции
+# --- Stage 1: Build the application (Builder) ---
+# Use the official Go image for compilation.
 FROM golang:1.21-alpine AS builder
 
-# Устанавливаем рабочую директорию внутри контейнера
+# Set the working directory inside the container.
 WORKDIR /app
 
-# Копируем файлы зависимостей и скачиваем их.
-# Это кэшируется, чтобы не скачивать все заново при каждом изменении кода.
+# Copy dependency files and download them.
+# This is cached to avoid re-downloading on every code change.
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Копируем остальной исходный код
+# Copy the rest of the source code.
 COPY . .
 
-# Собираем приложение.
-# CGO_ENABLED=0 создает статичный бинарный файл без C-зависимостей.
-# -o /runner указывает, куда положить скомпилированный файл.
-RUN CGO_ENABLED=0 GOOS=linux go build -o /runner main.go
+# Build the application.
+# CGO_ENABLED=0 creates a static binary without C dependencies.
+# -ldflags="-w -s" strips debug information to reduce binary size.
+# -o /runner specifies the output path for the compiled file.
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /runner main.go
 
 
-# --- Этап 2: Финальный образ (Runner) ---
-# Мы используем самый маленький базовый образ, чтобы наш сервис был легковесным.
+# --- Stage 2: Final Image (Runner) ---
+# Use the smallest possible base image to keep the service lightweight.
 FROM alpine:latest
 
-# Копируем системные сертификаты из образа-сборщика, они нужны для HTTPS-запросов.
+# Install the Docker CLI, which is required to execute `docker exec` commands.
+RUN apk add --no-cache docker-cli
+
+# Copy system certificates from the builder stage; these are needed for HTTPS requests.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-# Копируем только скомпилированный бинарный файл из образа-сборщика.
-# Ничего лишнего, только один файл.
+# Copy only the compiled binary file from the builder stage.
+# Nothing extra, just the single executable.
 COPY --from=builder /runner /runner
 
-# Указываем команду, которая будет запущена при старте контейнера.
+# Add a health check to let Docker know if the service is running correctly.
+# It simply checks if the main process is alive.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD pgrep -x runner || exit 1
+
+# Specify the command to run when the container starts.
 ENTRYPOINT ["/runner"]
