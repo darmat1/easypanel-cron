@@ -19,16 +19,19 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /runner main.go
 
 
 # --- Stage 2: Final Image (Runner) ---
-# Use a distroless image that contains common utilities like curl/wget.
-# It's minimal, secure, and doesn't rely on Alpine's musl.
-FROM gcr.io/distroless/cc-debian11
+# Use a minimal Alpine image which is small and has a package manager.
+FROM alpine:3.18
+
+# Install ca-certificates for HTTPS support (good practice) and wget for the healthcheck.
+RUN apk --no-cache add ca-certificates wget
+
+# Set the working directory.
+WORKDIR /
 
 # Copy the compiled binary from the builder stage.
 COPY --from=builder /runner /runner
 
-# Add a HEALTHCHECK that queries our built-in HTTP health endpoint.
-# This is more reliable than checking for a process ID.
-# `wget` is used as it's available in this base image.
+# The HEALTHCHECK remains the same, but now it will work because wget is installed.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
   CMD wget -qO- http://localhost:8081/healthz || exit 1
 
